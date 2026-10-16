@@ -1,0 +1,49 @@
+# Build output (firmware .elf/.hex/.bin/.map, objects, previews)
+/build/
+
+# Host test binaries produced by `make test`
+/tests/test_protocol
+/tests/test_calendar
+/tests/test_power_time
+
+# Compiler / linker artifacts anywhere
+*.o
+*.d
+*.elf
+*.map
+*.lst
+*.su
+*.a
+*.out
+*.ppm
+
+# Firmware images, except the vendored S130 SoftDevice needed by `make flash-softdevice`
+*.hex
+*.bin
+!/vendor/s130/hex/*.hex
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Debug / flashing tool leftovers
+*.jlink
+JLinkLog.txt
+pyocd.yaml
+pyocd_user.py
+
+# Editors and IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+compile_commands.json
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
