@@ -23,6 +23,24 @@
 #ifndef BLE_ENABLE
 #define BLE_ENABLE 0
 #endif
+#ifndef NFC_WAKE
+#define NFC_WAKE 0
+#endif
+#ifndef BOARD_NOR_FLASH
+#define BOARD_NOR_FLASH 0
+#endif
+#ifndef EPD_PANEL_FLASH
+#define EPD_PANEL_FLASH 0
+#endif
+#ifndef EPD_IDLE_PINS_HIGH
+#define EPD_IDLE_PINS_HIGH 1
+#endif
+#ifndef EPD_BUSY_GET_STATUS
+#define EPD_BUSY_GET_STATUS 1
+#endif
+#ifndef EPD_SPI_FREQUENCY_KHZ
+#define EPD_SPI_FREQUENCY_KHZ 2000
+#endif
 
 static void stop(const char *reason) {
     hal_epd_power_down();
@@ -35,6 +53,7 @@ static void stop(const char *reason) {
 static bool display_prepared_frame(void) {
     bool success = false;
     hal_init();
+    uint32_t started = hal_timestamp();
 
     if (epd7in5b_init() &&
         epd7in5b_display_generated(calendar_render_pixel, 0) &&
@@ -42,6 +61,7 @@ static bool display_prepared_frame(void) {
         success = true;
     }
 
+    hal_log_u32("EPD session total ms: ", hal_elapsed_ms(started));
     /* Always release SPI, BUSY and the high-frequency clock on every exit path. */
     hal_epd_power_down();
     return success;
@@ -64,7 +84,7 @@ static void log_banner(void) {
     hal_log_u32("BUSY pin: ", EPD_BUSY_PIN);
     hal_log_u32("BS pin: ", EPD_BS_PIN);
 #if EPD_USE_HARDWARE_SPI
-    hal_log("SPI backend: hardware SPI0, 2 MHz\n");
+    hal_log_u32("SPI backend: hardware SPI0, kHz: ", EPD_SPI_FREQUENCY_KHZ);
 #else
     hal_log("SPI backend: software mode 0, MSB first\n");
 #endif
@@ -73,6 +93,11 @@ static void log_banner(void) {
 #else
     hal_log("BLE: unavailable in this build\n");
 #endif
+    hal_log_u32("NFC wake: ", NFC_WAKE);
+    hal_log_u32("Board NOR flash power-down: ", BOARD_NOR_FLASH);
+    hal_log_u32("Panel flash power-down: ", EPD_PANEL_FLASH);
+    hal_log_u32("Panel idle pins high: ", EPD_IDLE_PINS_HIGH);
+    hal_log_u32("BUSY GET_STATUS: ", EPD_BUSY_GET_STATUS);
 }
 
 int main(void) {
@@ -80,6 +105,7 @@ int main(void) {
     log_banner();
     /* Do not leave SPI0 and the panel interface powered during BLE setup. */
     hal_epd_power_down();
+    hal_board_flash_power_down();
 
     calendar_date_t today = {CALENDAR_START_YEAR, CALENDAR_START_MONTH, CALENDAR_START_DAY};
     if (!calendar_date_valid(&today)) stop("invalid CALENDAR_START date");
@@ -103,6 +129,7 @@ int main(void) {
 #endif
 
     button_init();
+    nfc_wake_arm();
     if (!time_source_init(first_interval)) stop("RTC0 initialization");
 
     bool refresh_pending = true;
@@ -149,14 +176,26 @@ int main(void) {
         time_source_event_t event = time_source_wait_event();
         if (event == TIME_SOURCE_DAY) {
             calendar_add_days(&today, 1U);
+            hal_lfclk_calibrate();
+            /* Re-enable NFC wake in case a resting phone made it pause. */
+            nfc_wake_arm();
             if (!time_source_schedule(WAKE_INTERVAL_SECONDS)) stop("daily RTC schedule");
             refresh_pending = true;
             continue;
         }
 
-        uint32_t remaining_seconds = time_source_pause();
-        bool long_press = button_wait_for_long_press();
-        if (long_press) {
+        uint32_t remaining_seconds;
+        bool start_ble;
+        if (event == TIME_SOURCE_NFC) {
+            /* Confirm while RTC0 keeps counting; only a confirmed tap pauses the day timer. */
+            start_ble = nfc_wake_confirm();
+            hal_log(start_ble ? "NFC tap confirmed\n" : "NFC pulse ignored (no second pulse)\n");
+            remaining_seconds = time_source_pause();
+        } else {
+            remaining_seconds = time_source_pause();
+            start_ble = button_wait_for_long_press();
+        }
+        if (start_ble) {
 #if BLE_ENABLE
             uint32_t until_midnight = remaining_seconds;
             if (critical_latched) {
@@ -177,12 +216,13 @@ int main(void) {
                 }
             }
 #else
-            hal_log("Button held, but BLE is not available on this build\n");
+            hal_log("BLE requested, but BLE is not available on this build\n");
             if (!time_source_schedule(remaining_seconds)) stop("RTC resume after button");
 #endif
         } else if (!time_source_schedule(remaining_seconds)) {
             stop("RTC resume after short press");
         }
-        button_rearm_when_released();
+        if (event == TIME_SOURCE_NFC) nfc_wake_rearm_when_absent();
+        else button_rearm_when_released();
     }
 }

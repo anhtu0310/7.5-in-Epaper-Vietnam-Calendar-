@@ -19,11 +19,20 @@ Nordic S130 v2.0.1; its binary, headers, and license are under `vendor/s130`.
 | RST | P0.06 | P0.11 |
 | BUSY | P0.05 | P0.12 |
 | BS | P0.04 | P0.13 |
-| BLE button | P0.14 | P0.14 (BLE unavailable) |
+| BLE button | P0.02 | P0.02 (BLE unavailable) |
+| Panel flash CS | P0.03 | — |
+| Board NOR flash CS / SCK / MOSI | P0.30 / P0.00 / P0.02 | — |
+| NFC field detect | P0.25 | — |
 
-Wire the normally-open BLE button between **P0.14 and GND**. The internal
-pull-up is enabled, so no external resistor is required. `BS` is held low for
-4-wire SPI. SPI0 mode 0, MSB first, 2 MHz is the default.
+Wire the normally-open BLE button between **P0.02 and GND** (`BLE_BUTTON_PIN`).
+The internal pull-up is enabled, so no external resistor is required. `BS` is
+held low for 4-wire SPI. SPI0 mode 0, MSB first, 2 MHz is the default.
+
+The last three QFAA rows come from the tag's factory firmware. P0.03 selects the
+SPI flash on the panel FPC, reached through UC8159 command `0x65`
+(FLASH_CONTROL); P0.11 is that flash's data output and is not used yet. The
+board NOR flash shares P0.02 with the button; once the flash is in deep
+power-down it ignores that line.
 
 ## Build and preview
 
@@ -80,6 +89,16 @@ pyocd rtt -t nrf51822
 Do not flash only the QFAA application after a mass erase: S130 must also be at
 the bottom of flash. `qfaa-flash` handles both images in the correct order.
 
+## NFC tap wake
+
+QFAA tags have an NFC field detector on P0.25. It only signals that a reader's
+field is present; it carries no data. With `NFC_WAKE=1`, holding an NFC-enabled
+phone against the tag opens the same BLE window as a 3-second button hold. A
+phone polls about every 0.5 s, so a tap is accepted only after a second pulse
+within `NFC_CONFIRM_MS` (2000). Afterwards NFC wake re-arms once the field has
+been absent for `NFC_ABSENT_MS` (1500); if a phone keeps lying on the tag for
+`NFC_REARM_TIMEOUT_MS` (20000), NFC wake pauses until the next daily refresh.
+
 ## BLE time sync
 
 On QFAA, BLE advertises as `VNCalendar` for 120 seconds after power-up. Holding
@@ -133,11 +152,13 @@ packed rows, and replace the table in `src/ble_sync_qr.c`.
 ## Timekeeping and flash recovery
 
 RTC0 runs from LFCLK at 8 Hz in System ON low-power sleep. The default selects
-the external 32.768 kHz crystal. Use `LFCLK_SOURCE=rc` only on boards without
-that crystal:
+the internal RC oscillator, because unmodified tags have no 32.768 kHz crystal.
+It is calibrated against the 16 MHz crystal at startup and at every daily wake
+(`LFCLK_RC_CALIBRATE=1`); uncalibrated RC is only ±2%. On a board fitted with
+the crystal, select it:
 
 ```sh
-make BOARD=qfaa LFCLK_SOURCE=rc all
+make BOARD=qfaa LFCLK_SOURCE=xtal all
 ```
 
 After each successful calendar refresh, the displayed date is appended to a
@@ -191,6 +212,33 @@ remain available. The firmware now performs the following cleanup before sleep:
 - Always executes panel cleanup after an e-paper error or BUSY timeout.
 - Saves a synchronized date once, after the successful calendar refresh, rather
   than writing the same date both before and after that refresh.
+- Sleeps in System ON on RTC1 during every delay and BUSY poll instead of
+  spinning the CPU through the 15–30 s refresh.
+- Puts the board NOR flash and the panel FPC flash into deep power-down, as
+  the factory firmware does.
+- Leaves the panel control lines at the factory firmware's idle levels.
+
+Each step can be switched off for A/B current measurements:
+
+| Option | QFAA default | Effect |
+| --- | --- | --- |
+| `BOARD_NOR_FLASH` | 1 | Send `0xB9` to the board NOR flash at boot. Use 0 if the flash is removed. |
+| `EPD_PANEL_FLASH` | 1 | Wake the panel flash (`0xAB`) before init, park it (`0xB9`) before `POWER_OFF`. |
+| `EPD_IDLE_PINS_HIGH` | 1 | 1 = CS/DC/SCLK/MOSI/RST high while asleep (factory); 0 = all low. |
+| `EPD_BUSY_GET_STATUS` | 1 | Send `GET_STATUS` before each BUSY sample (Waveshare). The factory firmware does not. |
+| `EPD_BUSY_POLL_MS` | 100 | Sleep between BUSY samples. |
+| `EPD_SPI_FREQUENCY_KHZ` | 2000 | 125–8000; the log reports frame streaming time. |
+| `NFC_WAKE` | 1 | Open the BLE window on an NFC tap (see below). |
+
+QFAB builds default every board-specific option to 0. For a QFAA board whose
+NOR flash was removed and crystal fitted:
+
+```sh
+make BOARD=qfaa LFCLK_SOURCE=xtal BOARD_NOR_FLASH=0 all
+```
+
+The RTT log reports `EPD frame streaming complete, ms`, `EPD BUSY released after
+ms` and `EPD session total ms` for each refresh.
 
 For a valid current measurement, disconnect DAPLink/SWD and fully power-cycle the
 nRF51; attaching a debugger leaves nRF51 in a higher-current debug state. Measure

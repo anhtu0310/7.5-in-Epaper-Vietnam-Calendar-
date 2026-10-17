@@ -6,7 +6,8 @@
 
 typedef enum {
     TIME_SOURCE_DAY = 0,
-    TIME_SOURCE_BUTTON
+    TIME_SOURCE_BUTTON,
+    TIME_SOURCE_NFC
 } time_source_event_t;
 
 bool time_source_init(uint32_t first_interval_seconds);

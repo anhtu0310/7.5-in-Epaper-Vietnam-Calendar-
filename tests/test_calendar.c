@@ -53,7 +53,7 @@ int main(void) {
     assert(lunar.month == 1U);
     assert(lunar.day == 1U);
     assert(!lunar.leap_month);
-    assert(strcmp(special_day_on(&tet), "TẾT NGUYÊN ĐÁN") == 0);
+    assert(strcmp(special_day_on(&tet), "Tết Nguyên Đán") == 0);
 
     /* Known Vietnamese/Chinese divergence dates from Hồ Ngọc Đức's rules. */
     calendar_date_t tet_2007 = {2007U, 2U, 17U};

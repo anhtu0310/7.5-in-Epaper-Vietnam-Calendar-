@@ -32,6 +32,10 @@
 
 #define REG32(address) (*(volatile uint32_t *)(uintptr_t)(address))
 #define CLOCK_TASKS_HFCLKSTOP REG32(0x40000004UL)
+#define CLOCK_TASKS_LFCLKSTOP REG32(0x4000000CUL)
+#define CLOCK_LFCLKSTAT       REG32(0x40000418UL)
+#define LFCLK_RUNNING         (1UL << 16U)
+#define LFCLK_STOP_TIMEOUT    1000000UL
 #define RTC1_TASKS_START     REG32(0x40011000UL)
 #define RTC1_TASKS_STOP      REG32(0x40011004UL)
 #define RTC1_TASKS_CLEAR     REG32(0x40011008UL)
@@ -87,6 +91,14 @@ static bool check(uint32_t result, const char *operation) {
 }
 
 static bool stack_enable(void) {
+    /*
+     * hal_init() starts LFCLK for its sleep timer. RTC0 is paused or not yet
+     * started here, so stop LFCLK and let S130 configure it itself.
+     */
+    CLOCK_TASKS_LFCLKSTOP = 1U;
+    for (uint32_t timeout = LFCLK_STOP_TIMEOUT;
+         (CLOCK_LFCLKSTAT & LFCLK_RUNNING) != 0U && timeout != 0U; --timeout) { }
+
     nrf_clock_lf_cfg_t clock_cfg;
 #if defined(LFCLK_SOURCE_xtal)
     clock_cfg.source = NRF_CLOCK_LF_SRC_XTAL;
@@ -288,8 +300,7 @@ static void stack_disable(void) {
     CLOCK_TASKS_HFCLKSTOP = 1U;
 }
 
-bool ble_time_sync_run(calendar_date_t *date, uint32_t *seconds_until_midnight) {
-    if ((date == 0) || (seconds_until_midnight == 0)) return false;
+static bool run_window(calendar_date_t *date, uint32_t *seconds_until_midnight) {
     hal_log("BLE time-sync window starting (120 seconds)\n");
     connection_handle = BLE_CONN_HANDLE_INVALID;
     time_received = false;
@@ -315,6 +326,14 @@ bool ble_time_sync_run(calendar_date_t *date, uint32_t *seconds_until_midnight) 
     *date = received_date;
     *seconds_until_midnight = received_until_midnight;
     return true;
+}
+
+bool ble_time_sync_run(calendar_date_t *date, uint32_t *seconds_until_midnight) {
+    if ((date == 0) || (seconds_until_midnight == 0)) return false;
+    bool synced = run_window(date, seconds_until_midnight);
+    /* S130 normally leaves LFCLK running; restart it if enabling the stack failed. */
+    if (!hal_lfclk_start()) hal_log("Warning: LFCLK restart after BLE failed\n");
+    return synced;
 }
 
 #else

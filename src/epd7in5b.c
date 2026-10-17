@@ -19,6 +19,15 @@
 #ifndef EPD_BUSY_PIN
 #error "EPD_BUSY_PIN must be supplied by the Makefile"
 #endif
+#ifndef EPD_BUSY_GET_STATUS
+#define EPD_BUSY_GET_STATUS 1
+#endif
+#ifndef EPD_BUSY_POLL_MS
+#define EPD_BUSY_POLL_MS 100U
+#endif
+#ifndef EPD_PANEL_FLASH
+#define EPD_PANEL_FLASH 0
+#endif
 
 #define PANEL_SETTING                  0x00U
 #define POWER_SETTING                  0x01U
@@ -40,6 +49,10 @@
 
 #define BUSY_TIMEOUT_MS 60000U
 
+/* SPI NOR commands for the flash on the panel FPC (reached through FLASH_CONTROL). */
+#define PANEL_FLASH_RELEASE_POWER_DOWN 0xABU
+#define PANEL_FLASH_DEEP_POWER_DOWN    0xB9U
+
 static bool send_command(uint8_t command) {
     hal_gpio_write(EPD_DC_PIN, false);
     return hal_spi_write(command);
@@ -52,22 +65,38 @@ static bool send_data(uint8_t data) {
 
 static bool wait_until_idle(void) {
     uint32_t elapsed_ms = 0U;
+    uint32_t started = hal_timestamp();
 
     hal_log("EPD BUSY wait (active low)\n");
     for (;;) {
-        /* Waveshare V3 requires GET_STATUS before every BUSY sample. */
+#if EPD_BUSY_GET_STATUS
+        /* Waveshare V3 sends GET_STATUS before every BUSY sample; the factory firmware does not. */
         if (!send_command(GET_STATUS)) return false;
+#endif
         if (hal_gpio_read(EPD_BUSY_PIN)) break;
         if (elapsed_ms >= BUSY_TIMEOUT_MS) {
             hal_log("EPD BUSY timeout\n");
             return false;
         }
-        hal_delay_ms(100U);
-        elapsed_ms += 100U;
+        /* hal_delay_ms() sleeps in System ON once LFCLK is running. */
+        hal_delay_ms(EPD_BUSY_POLL_MS);
+        elapsed_ms += EPD_BUSY_POLL_MS;
     }
-    hal_log_u32("EPD BUSY released after ms: ", elapsed_ms);
+    hal_log_u32("EPD BUSY released after ms: ", hal_elapsed_ms(started));
     return true;
 }
+
+#if EPD_PANEL_FLASH
+/* Same sequence as the factory firmware: open the pass-through, one command, close it. */
+static bool panel_flash_command(uint8_t command) {
+    if (!send_command(FLASH_CONTROL) || !send_data(0x01U)) return false;
+    hal_delay_ms(1U);
+    if (!hal_panel_flash_command(command)) return false;
+    hal_delay_ms(1U);
+    if (!send_command(FLASH_CONTROL) || !send_data(0x00U)) return false;
+    return wait_until_idle();
+}
+#endif
 
 static void reset_panel(void) {
     /* Exact high-low-high reset from Waveshare EPD_7in5bc.c V3. */
@@ -97,6 +126,10 @@ static bool refresh(void) {
 
 bool epd7in5b_init(void) {
     reset_panel();
+#if EPD_PANEL_FLASH
+    hal_log("EPD panel flash: release from deep power-down\n");
+    if (!panel_flash_command(PANEL_FLASH_RELEASE_POWER_DOWN)) return false;
+#endif
 
     hal_log("EPD init: POWER_SETTING\n");
     if (!send_command(POWER_SETTING) || !send_data(0x37U) || !send_data(0x00U)) return false;
@@ -163,6 +196,7 @@ bool epd7in5b_display_generated(epd_pixel_fn pixel, void *context) {
     if ((pixel == 0) || !send_command(DATA_START_TRANSMISSION_1)) return false;
 
     hal_log("EPD frame streaming begin (122880 bytes)\n");
+    uint32_t started = hal_timestamp();
 
     for (uint16_t y = 0U; y < EPD7IN5B_HEIGHT; ++y) {
         for (uint16_t x = 0U; x < EPD7IN5B_WIDTH; x += 2U) {
@@ -171,11 +205,16 @@ bool epd7in5b_display_generated(epd_pixel_fn pixel, void *context) {
             if (!send_data((uint8_t)((high << 4U) | low))) return false;
         }
     }
-    hal_log("EPD frame streaming complete\n");
+    hal_log_u32("EPD frame streaming complete, ms: ", hal_elapsed_ms(started));
     return refresh();
 }
 
 bool epd7in5b_sleep(void) {
+#if EPD_PANEL_FLASH
+    /* The factory firmware parks the panel flash before POWER_OFF. */
+    hal_log("EPD panel flash: deep power-down\n");
+    if (!panel_flash_command(PANEL_FLASH_DEEP_POWER_DOWN)) return false;
+#endif
     if (!send_command(POWER_OFF) || !wait_until_idle()) return false;
     if (!send_command(DEEP_SLEEP)) return false;
     return send_data(0xA5U);
